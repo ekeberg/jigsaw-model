@@ -1,0 +1,8 @@
+numpy==1.26.4
+onnx==1.17.0
+onnxruntime==1.20.1
+optimum==1.23.3
+transformers==4.46.3
+diffusers==0.31.0
+accelerate==1.1.1
+pillow==11.0.0

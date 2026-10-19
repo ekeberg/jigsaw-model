@@ -1,0 +1,108 @@
+name: Build AI image model
+
+# Builds the on-device image generation model (see tools/prepare.py) and publishes it as the release the
+# app downloads it from. It only needs to run again when the model changes: bump MODEL_TAG here and in
+# ImageModel.kt (in the jigsaw app) together, so phones with the old files fetch the new ones.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - tools/**
+      - .github/workflows/model.yml
+
+permissions:
+  contents: write
+
+env:
+  MODEL_TAG: ai-model-sd-turbo-v1
+
+concurrency:
+  group: ai-model
+  cancel-in-progress: false
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if already published
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$MODEL_TAG" >/dev/null 2>&1; then
+            echo "Release $MODEL_TAG exists; bump MODEL_TAG to rebuild."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free disk space
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.skip != 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Python packages
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+          pip install -r tools/requirements.txt
+
+      - name: Export, quantize and test the model
+        if: steps.check.outputs.skip != 'true'
+        working-directory: ${{ runner.temp }}
+        run: python "$GITHUB_WORKSPACE/tools/prepare.py" "$RUNNER_TEMP/model"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          name: ai-model-samples
+          path: |
+            ${{ runner.temp }}/samples
+            ${{ runner.temp }}/model/model.json
+
+      - name: Publish release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/model"
+          gh release create "$MODEL_TAG" ./* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "AI image model (SD-Turbo, 8-bit ONNX)" \
+            --notes "Downloaded by the app when on-device image generation is turned on in Settings. SD-Turbo by Stability AI, under the Stability AI Community License (LICENSE.md). Powered by Stability AI."
+
+  # Runs the app's pipeline on the published files and attaches the pictures and timings to the release.
+  check:
+    needs: model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Python packages
+        run: pip install numpy==1.26.4 onnxruntime==1.20.1 pillow==11.0.0 transformers==4.46.3
+
+      - name: Download the published model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$MODEL_TAG" --dir "$RUNNER_TEMP/model"
+
+      - name: Generate samples
+        run: python tools/check.py "$RUNNER_TEMP/model" "$RUNNER_TEMP/check"
+
+      - name: Attach samples and timings to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$MODEL_TAG" "$RUNNER_TEMP"/check/* --clobber
+          sed 's/^/::notice::/' "$RUNNER_TEMP/check/timings.txt"
